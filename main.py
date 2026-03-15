@@ -7,7 +7,6 @@ import uuid
 import logging
 import cv2
 import numpy as np
-import mediapipe as mp
 
 app = FastAPI()
 
@@ -20,10 +19,6 @@ logging.basicConfig(
     filename=os.path.join("logs", "tryon.log"),
     format="%(asctime)s %(levelname)s %(message)s"
 )
-
-# MediaPipe pose setup
-mp_pose = mp.solutions.pose
-pose = mp_pose.Pose(static_image_mode=True)
 
 @app.post("/tryon")
 async def tryon(
@@ -54,57 +49,17 @@ async def tryon(
     product_img = cv2.imread(product_path)
     h, w = user_img.shape[:2]
 
-    # MediaPipe - Pose detect
-    rgb = cv2.cvtColor(user_img, cv2.COLOR_BGR2RGB)
-    results = pose.process(rgb)
+    # Simple chest region overlay
+    result = user_img.copy()
+    chest_w = w // 3
+    chest_h = h // 3
+    x_start = w // 3
+    y_start = h // 6
 
-    if results.pose_landmarks:
-        landmarks = results.pose_landmarks.landmark
-
-        # Left shoulder + Right shoulder points
-        left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER]
-        right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER]
-        left_hip = landmarks[mp_pose.PoseLandmark.LEFT_HIP]
-
-        # Pixel coordinates calculate
-        ls_x = int(left_shoulder.x * w)
-        rs_x = int(right_shoulder.x * w)
-        ls_y = int(left_shoulder.y * h)
-        lh_y = int(left_hip.y * h)
-
-        # Chest region width + height
-        chest_w = abs(ls_x - rs_x)
-        chest_h = int((lh_y - ls_y) * 0.8)
-
-        # Product image resize - chest size ku
-        product_resized = cv2.resize(product_img, (chest_w, chest_h))
-
-        # Overlay position
-        x_start = min(ls_x, rs_x)
-        y_start = ls_y
-
-        # Boundary check
-        x_end = min(x_start + chest_w, w)
-        y_end = min(y_start + chest_h, h)
-
-        actual_w = x_end - x_start
-        actual_h = y_end - y_start
-
-        # Overlay pannurom
-        result = user_img.copy()
-        result[y_start:y_end, x_start:x_end] = product_resized[:actual_h, :actual_w]
-
-        # Green border
-        cv2.rectangle(result, (x_start, y_start), (x_end, y_end), (0, 255, 0), 2)
-
-    else:
-        # Pose detect aagala - corner la போடுvooom
-        logging.warning(f"Job {job_id} - Pose not detected, using fallback")
-        result = user_img.copy()
-        ph, pw = product_img.shape[:2]
-        product_resized = cv2.resize(product_img, (w // 3, h // 3))
-        ph, pw = product_resized.shape[:2]
-        result[10:10+ph, w-pw-10:w-10] = product_resized
+    product_resized = cv2.resize(product_img, (chest_w, chest_h))
+    result[y_start:y_start+chest_h, x_start:x_start+chest_w] = product_resized
+    cv2.rectangle(result, (x_start, y_start),
+                  (x_start+chest_w, y_start+chest_h), (0, 255, 0), 2)
 
     cv2.imwrite(result_path, result)
 
