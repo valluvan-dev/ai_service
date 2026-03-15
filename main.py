@@ -54,7 +54,7 @@ async def tryon(
     chest_w = int(w * 0.45)
     chest_h = int(h * 0.35)
     x_start = int(w * 0.28)
-    y_start = int(h * 0.25)
+    y_start = int(h * 0.38)
 
     product_resized = cv2.resize(product_img, (chest_w, chest_h))
     result[y_start:y_start+chest_h, x_start:x_start+chest_w] = product_resized
