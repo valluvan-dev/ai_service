@@ -49,12 +49,12 @@ async def tryon(
     product_img = cv2.imread(product_path)
     h, w = user_img.shape[:2]
 
-    # Simple chest region overlay
+ # Better chest region - face kku keela, center la
     result = user_img.copy()
-    chest_w = w // 3
-    chest_h = h // 3
-    x_start = w // 3
-    y_start = h // 6
+    chest_w = int(w * 0.45)
+    chest_h = int(h * 0.35)
+    x_start = int(w * 0.28)
+    y_start = int(h * 0.25)
 
     product_resized = cv2.resize(product_img, (chest_w, chest_h))
     result[y_start:y_start+chest_h, x_start:x_start+chest_w] = product_resized
