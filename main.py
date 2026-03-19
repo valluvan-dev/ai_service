@@ -6,8 +6,9 @@ import time
 import uuid
 import logging
 import torch
-from diffusers import StableDiffusionPipeline
-import sys
+from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
+from controlnet_aux import OpenposeDetector
+from PIL import Image
 
 print("🚀 MAIN FILE LOADED")
 
@@ -23,16 +24,28 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s"
 )
 
-# 🔥 Load model ONCE
+# 🔥 DEVICE
 device = "cpu"
 
-print("⏳ Loading AI Model... (This takes time)")
-pipe = StableDiffusionPipeline.from_pretrained(
-    "runwayml/stable-diffusion-v1-5"
+# 🔥 LOAD CONTROLNET + MODEL
+print("⏳ Loading ControlNet Model...")
+
+controlnet = ControlNetModel.from_pretrained(
+    "lllyasviel/sd-controlnet-openpose"
 )
+
+pipe = StableDiffusionControlNetPipeline.from_pretrained(
+    "runwayml/stable-diffusion-v1-5",
+    controlnet=controlnet
+)
+
 pipe = pipe.to(device)
 pipe.enable_attention_slicing()
-print("✅ Model Loaded Successfully")
+
+# 🔥 POSE DETECTOR
+openpose = OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
+
+print("✅ ControlNet Model Loaded Successfully")
 
 
 @app.post("/tryon")
@@ -66,18 +79,26 @@ async def tryon(
         shutil.copyfileobj(product_image.file, buffer)
 
     try:
-        print("🔥 AI MODEL START")
+        print("🔥 POSE DETECTION START")
+
+        user_img = Image.open(user_path).convert("RGB")
+
+        # 🔥 pose extraction
+        pose_image = openpose(user_img)
+
+        print("🔥 POSE DETECTION DONE")
 
         prompt = "a full body person wearing a stylish modern outfit"
 
+        print("🔥 CONTROLNET GENERATION START")
+
         image = pipe(
             prompt,
-            num_inference_steps=20,
-            height=512,
-            width=512
+            image=pose_image,
+            num_inference_steps=20
         ).images[0]
 
-        print("🔥 AI MODEL DONE")
+        print("🔥 CONTROLNET GENERATION DONE")
 
         image.save(result_path)
 
