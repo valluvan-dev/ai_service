@@ -5,8 +5,11 @@ import os
 import time
 import uuid
 import logging
-import cv2
-import numpy as np
+import torch
+from diffusers import StableDiffusionPipeline
+import sys
+
+print("🚀 MAIN FILE LOADED")
 
 app = FastAPI()
 
@@ -20,48 +23,68 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s"
 )
 
+# 🔥 Load model ONCE
+device = "cpu"
+
+print("⏳ Loading AI Model... (This takes time)")
+pipe = StableDiffusionPipeline.from_pretrained(
+    "runwayml/stable-diffusion-v1-5"
+)
+pipe = pipe.to(device)
+pipe.enable_attention_slicing()
+print("✅ Model Loaded Successfully")
+
+
 @app.post("/tryon")
 async def tryon(
     user_image: UploadFile = File(...),
     product_image: UploadFile = File(...)
 ):
+    print("🔥 TRYON API HIT")
+
     start_time = time.time()
     job_id = str(uuid.uuid4())
 
+    # validation
     if not user_image.content_type or not user_image.content_type.startswith("image/"):
-        return JSONResponse({"error": "Invalid file type"}, status_code=400)
+        return JSONResponse({"error": "Invalid user image"}, status_code=400)
+
     if not product_image.content_type or not product_image.content_type.startswith("image/"):
-        return JSONResponse({"error": "Invalid file type"}, status_code=400)
+        return JSONResponse({"error": "Invalid product image"}, status_code=400)
 
     logging.info(f"Job {job_id} started")
 
     user_path = os.path.join(UPLOAD_DIR, f"{job_id}_user.jpg")
     product_path = os.path.join(UPLOAD_DIR, f"{job_id}_product.jpg")
-    result_path = os.path.join(UPLOAD_DIR, f"{job_id}_result.jpg")
+    result_path = os.path.join(UPLOAD_DIR, f"{job_id}_result.png")
 
+    # save images
     with open(user_path, "wb") as buffer:
         shutil.copyfileobj(user_image.file, buffer)
+
     with open(product_path, "wb") as buffer:
         shutil.copyfileobj(product_image.file, buffer)
 
-    # Images load
-    user_img = cv2.imread(user_path)
-    product_img = cv2.imread(product_path)
-    h, w = user_img.shape[:2]
+    try:
+        print("🔥 AI MODEL START")
 
- # Better chest region - face kku keela, center la
-    result = user_img.copy()
-    chest_w = int(w * 0.45)
-    chest_h = int(h * 0.35)
-    x_start = int(w * 0.28)
-    y_start = int(h * 0.38)
+        prompt = "a full body person wearing a stylish modern outfit"
 
-    product_resized = cv2.resize(product_img, (chest_w, chest_h))
-    result[y_start:y_start+chest_h, x_start:x_start+chest_w] = product_resized
-    cv2.rectangle(result, (x_start, y_start),
-                  (x_start+chest_w, y_start+chest_h), (0, 255, 0), 2)
+        image = pipe(
+            prompt,
+            num_inference_steps=20,
+            height=512,
+            width=512
+        ).images[0]
 
-    cv2.imwrite(result_path, result)
+        print("🔥 AI MODEL DONE")
+
+        image.save(result_path)
+
+    except Exception as e:
+        print("❌ ERROR:", str(e))
+        logging.error(f"Job {job_id} failed: {str(e)}")
+        return JSONResponse({"error": "Processing failed"}, status_code=500)
 
     processing_time = round(time.time() - start_time, 3)
     logging.info(f"Job {job_id} processing time: {processing_time}")
@@ -73,9 +96,12 @@ async def tryon(
         "result_image": f"/result/{job_id}"
     })
 
+
 @app.get("/result/{job_id}")
 async def get_result(job_id: str):
-    result_path = os.path.join(UPLOAD_DIR, f"{job_id}_result.jpg")
+    result_path = os.path.join(UPLOAD_DIR, f"{job_id}_result.png")
+
     if not os.path.exists(result_path):
         return JSONResponse({"error": "Result not found"}, status_code=404)
-    return FileResponse(result_path, media_type="image/jpeg")
+
+    return FileResponse(result_path, media_type="image/png")
