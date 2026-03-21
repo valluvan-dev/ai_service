@@ -5,10 +5,9 @@ import os
 import time
 import uuid
 import logging
-import torch
-from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
-from controlnet_aux import OpenposeDetector
 from PIL import Image
+import numpy as np
+from rembg import remove
 
 print("🚀 MAIN FILE LOADED")
 
@@ -24,30 +23,27 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s"
 )
 
-# 🔥 DEVICE
-device = "cpu"
-
-# 🔥 LOAD CONTROLNET + MODEL
-print("⏳ Loading ControlNet Model...")
-
-controlnet = ControlNetModel.from_pretrained(
-    "lllyasviel/sd-controlnet-openpose"
-)
-
-pipe = StableDiffusionControlNetPipeline.from_pretrained(
-    "runwayml/stable-diffusion-v1-5",
-    controlnet=controlnet
-)
-
-pipe = pipe.to(device)
-pipe.enable_attention_slicing()
-
-# 🔥 POSE DETECTOR
-openpose = OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
-
-print("✅ ControlNet Model Loaded Successfully")
+# -------------------------------
+# 🔥 SEGMENTATION FUNCTION
+# -------------------------------
+def segment_person(image_path):
+    input_image = Image.open(image_path).convert("RGBA")
+    output = remove(input_image)
+    return output
 
 
+# -------------------------------
+# 🔥 CLOTH PREP FUNCTION
+# -------------------------------
+def prepare_cloth(cloth_path, target_size):
+    cloth = Image.open(cloth_path).convert("RGBA")
+    cloth = cloth.resize(target_size)
+    return cloth
+
+
+# -------------------------------
+# 🔥 TRYON API
+# -------------------------------
 @app.post("/tryon")
 async def tryon(
     user_image: UploadFile = File(...),
@@ -58,57 +54,68 @@ async def tryon(
     start_time = time.time()
     job_id = str(uuid.uuid4())
 
-    # validation
-    if not user_image.content_type or not user_image.content_type.startswith("image/"):
+    if not user_image.content_type.startswith("image/"):
         return JSONResponse({"error": "Invalid user image"}, status_code=400)
 
-    if not product_image.content_type or not product_image.content_type.startswith("image/"):
+    if not product_image.content_type.startswith("image/"):
         return JSONResponse({"error": "Invalid product image"}, status_code=400)
 
-    logging.info(f"Job {job_id} started")
-
-    user_path = os.path.join(UPLOAD_DIR, f"{job_id}_user.jpg")
-    product_path = os.path.join(UPLOAD_DIR, f"{job_id}_product.jpg")
+    user_path = os.path.join(UPLOAD_DIR, f"{job_id}_user.png")
+    product_path = os.path.join(UPLOAD_DIR, f"{job_id}_product.png")
     result_path = os.path.join(UPLOAD_DIR, f"{job_id}_result.png")
 
-    # save images
-    with open(user_path, "wb") as buffer:
-        shutil.copyfileobj(user_image.file, buffer)
+    # Save images
+    with open(user_path, "wb") as f:
+        shutil.copyfileobj(user_image.file, f)
 
-    with open(product_path, "wb") as buffer:
-        shutil.copyfileobj(product_image.file, buffer)
+    with open(product_path, "wb") as f:
+        shutil.copyfileobj(product_image.file, f)
 
     try:
-        print("🔥 POSE DETECTION START")
+        print("🔥 SEGMENTATION START")
 
-        user_img = Image.open(user_path).convert("RGB")
+        # 1. Segment person
+        person_img = segment_person(user_path)
 
-        # 🔥 pose extraction
-        pose_image = openpose(user_img)
+        print("🔥 SEGMENTATION DONE")
 
-        print("🔥 POSE DETECTION DONE")
+        # 2. Prepare cloth
+        cloth_img = prepare_cloth(product_path, person_img.size)
 
-        prompt = "a full body person wearing a stylish modern outfit"
+        print("🔥 CLOTH PREPARED")
 
-        print("🔥 CONTROLNET GENERATION START")
+        # 3. Convert to numpy
+        person_np = np.array(person_img)
+        cloth_np = np.array(cloth_img)
 
-        image = pipe(
-            prompt,
-            image=pose_image,
-            num_inference_steps=20
-        ).images[0]
+        result_np = person_np.copy()
 
-        print("🔥 CONTROLNET GENERATION DONE")
+        h, w = person_np.shape[:2]
 
-        image.save(result_path)
+        # 4. Chest region (approx)
+        x1 = int(w * 0.25)
+        y1 = int(h * 0.30)
+        x2 = int(w * 0.75)
+        y2 = int(h * 0.65)
+
+        cloth_resized = np.array(
+            cloth_img.resize((x2 - x1, y2 - y1))
+        )
+
+        # 5. Overlay cloth
+        result_np[y1:y2, x1:x2] = cloth_resized
+
+        result = Image.fromarray(result_np)
+
+        print("🔥 TRY-ON DONE")
+
+        result.save(result_path)
 
     except Exception as e:
         print("❌ ERROR:", str(e))
-        logging.error(f"Job {job_id} failed: {str(e)}")
         return JSONResponse({"error": "Processing failed"}, status_code=500)
 
     processing_time = round(time.time() - start_time, 3)
-    logging.info(f"Job {job_id} processing time: {processing_time}")
 
     return JSONResponse({
         "status": "success",
@@ -118,6 +125,9 @@ async def tryon(
     })
 
 
+# -------------------------------
+# 🔥 RESULT API
+# -------------------------------
 @app.get("/result/{job_id}")
 async def get_result(job_id: str):
     result_path = os.path.join(UPLOAD_DIR, f"{job_id}_result.png")
