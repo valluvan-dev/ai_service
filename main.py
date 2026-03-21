@@ -8,6 +8,7 @@ import logging
 from PIL import Image
 import numpy as np
 from rembg import remove
+import cv2
 
 print("🚀 MAIN FILE LOADED")
 
@@ -24,7 +25,7 @@ logging.basicConfig(
 )
 
 # -------------------------------
-# 🔥 SEGMENTATION FUNCTION
+# 🔥 SEGMENTATION
 # -------------------------------
 def segment_person(image_path):
     input_image = Image.open(image_path).convert("RGBA")
@@ -33,12 +34,31 @@ def segment_person(image_path):
 
 
 # -------------------------------
-# 🔥 CLOTH PREP FUNCTION
+# 🔥 CLOTH PREP
 # -------------------------------
 def prepare_cloth(cloth_path, target_size):
     cloth = Image.open(cloth_path).convert("RGBA")
     cloth = cloth.resize(target_size)
     return cloth
+
+
+# -------------------------------
+# 🔥 SHIRT MASK (IMPROVED)
+# -------------------------------
+def get_shirt_mask(image_np):
+    h, w = image_np.shape[:2]
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+
+    # Better region approximation
+    y1 = int(h * 0.25)
+    y2 = int(h * 0.65)
+    x1 = int(w * 0.20)
+    x2 = int(w * 0.80)
+
+    mask[y1:y2, x1:x2] = 1
+
+    return mask
 
 
 # -------------------------------
@@ -88,26 +108,25 @@ async def tryon(
         person_np = np.array(person_img)
         cloth_np = np.array(cloth_img)
 
+        # 4. Generate mask
+        print("🔥 MASK GENERATION START")
+        mask = get_shirt_mask(person_np)
+        print("🔥 MASK READY")
+
+        # 5. Apply mask blending
         result_np = person_np.copy()
 
-        h, w = person_np.shape[:2]
-
-        # 4. Chest region (approx)
-        x1 = int(w * 0.25)
-        y1 = int(h * 0.30)
-        x2 = int(w * 0.75)
-        y2 = int(h * 0.65)
-
-        cloth_resized = np.array(
-            cloth_img.resize((x2 - x1, y2 - y1))
-        )
-
-        # 5. Overlay cloth
-        result_np[y1:y2, x1:x2] = cloth_resized
+        for i in range(person_np.shape[0]):
+            for j in range(person_np.shape[1]):
+                if mask[i, j] == 1:
+                    # Blend instead of hard replace
+                    result_np[i, j] = (
+                        0.6 * cloth_np[i, j] + 0.4 * person_np[i, j]
+                    ).astype(np.uint8)
 
         result = Image.fromarray(result_np)
 
-        print("🔥 TRY-ON DONE")
+        print("🔥 MASK TRY-ON DONE")
 
         result.save(result_path)
 
