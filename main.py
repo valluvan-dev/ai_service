@@ -10,6 +10,8 @@ import numpy as np
 from rembg import remove
 import cv2
 import mediapipe as mp
+import torch
+from diffusers import StableDiffusionImg2ImgPipeline
 
 print("🚀 MAIN FILE LOADED")
 
@@ -30,7 +32,6 @@ logging.basicConfig(
 # -------------------------------
 mp_pose = mp.solutions.pose
 
-
 def get_shoulders(image_path):
     image = cv2.imread(image_path)
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -46,10 +47,7 @@ def get_shoulders(image_path):
         left = results.pose_landmarks.landmark[11]
         right = results.pose_landmarks.landmark[12]
 
-        left_shoulder = (int(left.x * w), int(left.y * h))
-        right_shoulder = (int(right.x * w), int(right.y * h))
-
-        return left_shoulder, right_shoulder
+        return (int(left.x * w), int(left.y * h)), (int(right.x * w), int(right.y * h))
 
 
 # -------------------------------
@@ -57,28 +55,29 @@ def get_shoulders(image_path):
 # -------------------------------
 def segment_person(image_path):
     input_image = Image.open(image_path).convert("RGBA")
-    output = remove(input_image)
-    return output
+    return remove(input_image)
+
+
+# -------------------------------
+# 🔥 LOAD AI MODEL (ONCE)
+# -------------------------------
+print("⏳ Loading AI Model...")
+pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
+    "runwayml/stable-diffusion-v1-5"
+)
+pipe = pipe.to("cpu")
+pipe.enable_attention_slicing()
+print("✅ AI Model Loaded")
 
 
 # -------------------------------
 # 🔥 TRYON API
 # -------------------------------
 @app.post("/tryon")
-async def tryon(
-    user_image: UploadFile = File(...),
-    product_image: UploadFile = File(...)
-):
-    print("🔥 TRYON API HIT")
+async def tryon(user_image: UploadFile = File(...), product_image: UploadFile = File(...)):
 
     start_time = time.time()
     job_id = str(uuid.uuid4())
-
-    if not user_image.content_type.startswith("image/"):
-        return JSONResponse({"error": "Invalid user image"}, status_code=400)
-
-    if not product_image.content_type.startswith("image/"):
-        return JSONResponse({"error": "Invalid product image"}, status_code=400)
 
     user_path = os.path.join(UPLOAD_DIR, f"{job_id}_user.png")
     product_path = os.path.join(UPLOAD_DIR, f"{job_id}_product.png")
@@ -91,47 +90,42 @@ async def tryon(
         shutil.copyfileobj(product_image.file, f)
 
     try:
-        print("🔥 SEGMENTATION START")
-
-        # 1. Segment person
+        # -------------------------------
+        # 1. SEGMENT PERSON
+        # -------------------------------
         person_img = segment_person(user_path)
         person_np = np.array(person_img)
 
-        print("🔥 SEGMENTATION DONE")
-
-        # 2. Pose detection
+        # -------------------------------
+        # 2. POSE DETECTION
+        # -------------------------------
         shoulders = get_shoulders(user_path)
-
         if shoulders is None:
             raise Exception("Pose not detected")
 
         left, right = shoulders
-        print("🔥 SHOULDERS:", left, right)
 
-        # 3. Cloth size
+        # -------------------------------
+        # 3. CLOTH SIZE
+        # -------------------------------
         shoulder_width = abs(right[0] - left[0])
         cloth_width = int(shoulder_width * 1.6)
         cloth_height = int(cloth_width * 1.4)
 
-        # 4. Load cloth
         cloth_img = Image.open(product_path).convert("RGBA")
-        cloth_resized = cloth_img.resize((cloth_width, cloth_height))
-        cloth_np = np.array(cloth_resized)
+        cloth_np = np.array(cloth_img.resize((cloth_width, cloth_height)))
 
         # -------------------------------
-        # 🔥 WARPING (MAIN LOGIC)
+        # 4. WARPING
         # -------------------------------
         h_c, w_c = cloth_np.shape[:2]
 
         src_pts = np.float32([
-            [0, 0],
-            [w_c, 0],
-            [0, h_c],
-            [w_c, h_c]
+            [0, 0], [w_c, 0],
+            [0, h_c], [w_c, h_c]
         ])
 
-        # Adjust Y (important fix)
-        top_y = int(min(left[1], right[1]) - (cloth_height * 0.25))
+        top_y = int(min(left[1], right[1]) - (cloth_height * 0.35))
 
         dst_pts = np.float32([
             [left[0], top_y],
@@ -142,54 +136,60 @@ async def tryon(
 
         matrix = cv2.getPerspectiveTransform(src_pts, dst_pts)
 
-        warped_cloth = cv2.warpPerspective(
+        warped = cv2.warpPerspective(
             cloth_np,
             matrix,
             (person_np.shape[1], person_np.shape[0])
         )
 
-        print("🔥 WARPING DONE")
+        # -------------------------------
+        # 5. SAFE ALPHA BLENDING (FIXED)
+        # -------------------------------
+        alpha = warped[:, :, 3] / 255.0
+        alpha = np.where(alpha > 0.1, alpha, 0)
 
-        # -------------------------------
-        # 🔥 ALPHA BLENDING
-        # -------------------------------
-        alpha_mask = warped_cloth[:, :, 3] / 255.0
+        mask = alpha > 0
 
         for c in range(3):
-            person_np[:, :, c] = (
-                alpha_mask * warped_cloth[:, :, c] +
-                (1 - alpha_mask) * person_np[:, :, c]
+            person_np[:, :, c][mask] = (
+                alpha[mask] * warped[:, :, c][mask] +
+                (1 - alpha[mask]) * person_np[:, :, c][mask]
             )
 
-        result = Image.fromarray(person_np)
+        # -------------------------------
+        # 6. AI REFINEMENT (🔥 NEW)
+        # -------------------------------
+        input_img = Image.fromarray(person_np).convert("RGB")
 
-        print("🔥 FINAL OUTPUT READY")
+        prompt = "a realistic photo of a person wearing a shirt, natural lighting, high detail"
 
-        result.save(result_path)
+        ai_result = pipe(
+            prompt=prompt,
+            image=input_img,
+            strength=0.4,
+            guidance_scale=7.5
+        ).images[0]
+
+        ai_result.save(result_path)
 
     except Exception as e:
-        print("❌ ERROR:", str(e))
         logging.error(str(e))
-        return JSONResponse({"error": "Processing failed"}, status_code=500)
-
-    processing_time = round(time.time() - start_time, 3)
+        return JSONResponse({"error": str(e)}, status_code=500)
 
     return JSONResponse({
         "status": "success",
         "job_id": job_id,
-        "processing_time": processing_time,
+        "processing_time": round(time.time() - start_time, 3),
         "result_image": f"/result/{job_id}"
     })
 
 
 # -------------------------------
-# 🔥 RESULT API
+# RESULT
 # -------------------------------
 @app.get("/result/{job_id}")
 async def get_result(job_id: str):
-    result_path = os.path.join(UPLOAD_DIR, f"{job_id}_result.png")
-
-    if not os.path.exists(result_path):
-        return JSONResponse({"error": "Result not found"}, status_code=404)
-
-    return FileResponse(result_path, media_type="image/png")
+    path = os.path.join(UPLOAD_DIR, f"{job_id}_result.png")
+    if not os.path.exists(path):
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return FileResponse(path)
