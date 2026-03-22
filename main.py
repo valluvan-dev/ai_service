@@ -10,7 +10,6 @@ import numpy as np
 from rembg import remove
 import cv2
 import mediapipe as mp
-import torch
 from diffusers import StableDiffusionImg2ImgPipeline
 
 print("🚀 MAIN FILE LOADED")
@@ -28,7 +27,7 @@ logging.basicConfig(
 )
 
 # -------------------------------
-# 🔥 MEDIAPIPE SETUP
+# 🔥 MEDIAPIPE
 # -------------------------------
 mp_pose = mp.solutions.pose
 
@@ -59,7 +58,7 @@ def segment_person(image_path):
 
 
 # -------------------------------
-# 🔥 LOAD AI MODEL (ONCE)
+# 🔥 LOAD AI MODEL
 # -------------------------------
 print("⏳ Loading AI Model...")
 pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
@@ -94,10 +93,13 @@ async def tryon(user_image: UploadFile = File(...), product_image: UploadFile = 
         # 1. SEGMENT PERSON
         # -------------------------------
         person_img = segment_person(user_path)
+
+        # 🔥 IMPORTANT FIX
         person_np = np.array(person_img)
+        person_rgb = person_np[:, :, :3]   # remove alpha
 
         # -------------------------------
-        # 2. POSE DETECTION
+        # 2. POSE
         # -------------------------------
         shoulders = get_shoulders(user_path)
         if shoulders is None:
@@ -106,7 +108,7 @@ async def tryon(user_image: UploadFile = File(...), product_image: UploadFile = 
         left, right = shoulders
 
         # -------------------------------
-        # 3. CLOTH SIZE
+        # 3. CLOTH
         # -------------------------------
         shoulder_width = abs(right[0] - left[0])
         cloth_width = int(shoulder_width * 1.6)
@@ -116,7 +118,7 @@ async def tryon(user_image: UploadFile = File(...), product_image: UploadFile = 
         cloth_np = np.array(cloth_img.resize((cloth_width, cloth_height)))
 
         # -------------------------------
-        # 4. WARPING
+        # 4. WARP
         # -------------------------------
         h_c, w_c = cloth_np.shape[:2]
 
@@ -139,41 +141,37 @@ async def tryon(user_image: UploadFile = File(...), product_image: UploadFile = 
         warped = cv2.warpPerspective(
             cloth_np,
             matrix,
-            (person_np.shape[1], person_np.shape[0])
+            (person_rgb.shape[1], person_rgb.shape[0])
         )
 
         # -------------------------------
-        # 5. SAFE ALPHA BLENDING (FIXED)
+        # 5. BLEND (FIXED)
         # -------------------------------
         alpha = warped[:, :, 3] / 255.0
         alpha = np.where(alpha > 0.1, alpha, 0)
 
-        mask = alpha > 0
-
         for c in range(3):
-            person_np[:, :, c][mask] = (
-                alpha[mask] * warped[:, :, c][mask] +
-                (1 - alpha[mask]) * person_np[:, :, c][mask]
+            person_rgb[:, :, c] = (
+                alpha * warped[:, :, c] +
+                (1 - alpha) * person_rgb[:, :, c]
             )
 
         # -------------------------------
-        # 6. AI REFINEMENT (🔥 NEW)
+        # 6. AI REFINEMENT (SAFE)
         # -------------------------------
-        input_img = Image.fromarray(person_np).convert("RGB")
-
-        prompt = "a realistic photo of a person wearing a shirt, natural lighting, high detail"
+        input_img = Image.fromarray(person_rgb.astype(np.uint8))
 
         ai_result = pipe(
-            prompt=prompt,
+            prompt="realistic photo of a person wearing a shirt",
             image=input_img,
-            strength=0.4,
-            guidance_scale=7.5
+            strength=0.3,   # 🔥 reduced (important)
+            guidance_scale=7
         ).images[0]
 
         ai_result.save(result_path)
 
     except Exception as e:
-        logging.error(str(e))
+        print("❌ ERROR:", str(e))
         return JSONResponse({"error": str(e)}, status_code=500)
 
     return JSONResponse({
