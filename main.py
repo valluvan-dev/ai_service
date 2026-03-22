@@ -9,6 +9,7 @@ from PIL import Image
 import numpy as np
 from rembg import remove
 import cv2
+import mediapipe as mp
 
 print("🚀 MAIN FILE LOADED")
 
@@ -25,40 +26,39 @@ logging.basicConfig(
 )
 
 # -------------------------------
+# 🔥 MEDIAPIPE SETUP
+# -------------------------------
+mp_pose = mp.solutions.pose
+
+
+def get_shoulders(image_path):
+    image = cv2.imread(image_path)
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    with mp_pose.Pose(static_image_mode=True) as pose:
+        results = pose.process(image_rgb)
+
+        if not results.pose_landmarks:
+            return None
+
+        h, w, _ = image.shape
+
+        left = results.pose_landmarks.landmark[11]
+        right = results.pose_landmarks.landmark[12]
+
+        left_shoulder = (int(left.x * w), int(left.y * h))
+        right_shoulder = (int(right.x * w), int(right.y * h))
+
+        return left_shoulder, right_shoulder
+
+
+# -------------------------------
 # 🔥 SEGMENTATION
 # -------------------------------
 def segment_person(image_path):
     input_image = Image.open(image_path).convert("RGBA")
     output = remove(input_image)
     return output
-
-
-# -------------------------------
-# 🔥 CLOTH PREP
-# -------------------------------
-def prepare_cloth(cloth_path, target_size):
-    cloth = Image.open(cloth_path).convert("RGBA")
-    cloth = cloth.resize(target_size)
-    return cloth
-
-
-# -------------------------------
-# 🔥 SHIRT MASK (IMPROVED)
-# -------------------------------
-def get_shirt_mask(image_np):
-    h, w = image_np.shape[:2]
-
-    mask = np.zeros((h, w), dtype=np.uint8)
-
-    # Better region approximation
-    y1 = int(h * 0.25)
-    y2 = int(h * 0.65)
-    x1 = int(w * 0.20)
-    x2 = int(w * 0.80)
-
-    mask[y1:y2, x1:x2] = 1
-
-    return mask
 
 
 # -------------------------------
@@ -84,7 +84,7 @@ async def tryon(
     product_path = os.path.join(UPLOAD_DIR, f"{job_id}_product.png")
     result_path = os.path.join(UPLOAD_DIR, f"{job_id}_result.png")
 
-    # Save images
+    # Save files
     with open(user_path, "wb") as f:
         shutil.copyfileobj(user_image.file, f)
 
@@ -96,42 +96,75 @@ async def tryon(
 
         # 1. Segment person
         person_img = segment_person(user_path)
+        person_np = np.array(person_img)
 
         print("🔥 SEGMENTATION DONE")
 
-        # 2. Prepare cloth
-        cloth_img = prepare_cloth(product_path, person_img.size)
+        # 2. Detect shoulders
+        print("🔥 POSE DETECTION START")
+        shoulders = get_shoulders(user_path)
 
-        print("🔥 CLOTH PREPARED")
+        if shoulders is None:
+            raise Exception("Pose not detected")
 
-        # 3. Convert to numpy
-        person_np = np.array(person_img)
-        cloth_np = np.array(cloth_img)
+        left, right = shoulders
+        print("🔥 POSE DETECTED:", left, right)
 
-        # 4. Generate mask
-        print("🔥 MASK GENERATION START")
-        mask = get_shirt_mask(person_np)
-        print("🔥 MASK READY")
+        # 3. Calculate cloth size
+        shoulder_width = abs(right[0] - left[0])
 
-        # 5. Apply mask blending
+        cloth_width = int(shoulder_width * 1.3)
+        cloth_height = int(cloth_width * 1.4)
+
+        # 4. Load cloth
+        cloth_img = Image.open(product_path).convert("RGBA")
+        cloth_resized = cloth_img.resize((cloth_width, cloth_height))
+        cloth_np = np.array(cloth_resized)
+
+        print("🔥 CLOTH RESIZED")
+
+        # 5. Position calculation
+        center_x = int((left[0] + right[0]) / 2)
+        top_y = min(left[1], right[1])
+
+        x1 = int(center_x - cloth_width / 2)
+        y1 = int(top_y)
+
+        x2 = x1 + cloth_width
+        y2 = y1 + cloth_height
+
+        # 6. Boundary check
+        h, w = person_np.shape[:2]
+
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(w, x2)
+        y2 = min(h, y2)
+
+        cloth_crop = cloth_np[0:(y2 - y1), 0:(x2 - x1)]
+
+        # 7. Overlay with alpha blending
         result_np = person_np.copy()
 
-        for i in range(person_np.shape[0]):
-            for j in range(person_np.shape[1]):
-                if mask[i, j] == 1:
-                    # Blend instead of hard replace
-                    result_np[i, j] = (
-                        0.6 * cloth_np[i, j] + 0.4 * person_np[i, j]
-                    ).astype(np.uint8)
+        alpha = 0.7
+
+        region = result_np[y1:y2, x1:x2]
+
+        blended = (
+            alpha * cloth_crop + (1 - alpha) * region
+        ).astype(np.uint8)
+
+        result_np[y1:y2, x1:x2] = blended
 
         result = Image.fromarray(result_np)
 
-        print("🔥 MASK TRY-ON DONE")
+        print("🔥 FINAL TRY-ON DONE")
 
         result.save(result_path)
 
     except Exception as e:
         print("❌ ERROR:", str(e))
+        logging.error(str(e))
         return JSONResponse({"error": "Processing failed"}, status_code=500)
 
     processing_time = round(time.time() - start_time, 3)
