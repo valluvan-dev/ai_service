@@ -84,7 +84,6 @@ async def tryon(
     product_path = os.path.join(UPLOAD_DIR, f"{job_id}_product.png")
     result_path = os.path.join(UPLOAD_DIR, f"{job_id}_result.png")
 
-    # Save files
     with open(user_path, "wb") as f:
         shutil.copyfileobj(user_image.file, f)
 
@@ -100,20 +99,18 @@ async def tryon(
 
         print("🔥 SEGMENTATION DONE")
 
-        # 2. Detect shoulders
-        print("🔥 POSE DETECTION START")
+        # 2. Pose detection
         shoulders = get_shoulders(user_path)
 
         if shoulders is None:
             raise Exception("Pose not detected")
 
         left, right = shoulders
-        print("🔥 POSE DETECTED:", left, right)
+        print("🔥 SHOULDERS:", left, right)
 
-        # 3. Calculate cloth size
+        # 3. Cloth size
         shoulder_width = abs(right[0] - left[0])
-
-        cloth_width = int(shoulder_width * 1.3)
+        cloth_width = int(shoulder_width * 1.6)
         cloth_height = int(cloth_width * 1.4)
 
         # 4. Load cloth
@@ -121,44 +118,52 @@ async def tryon(
         cloth_resized = cloth_img.resize((cloth_width, cloth_height))
         cloth_np = np.array(cloth_resized)
 
-        print("🔥 CLOTH RESIZED")
+        # -------------------------------
+        # 🔥 WARPING (MAIN LOGIC)
+        # -------------------------------
+        h_c, w_c = cloth_np.shape[:2]
 
-        # 5. Position calculation
-        center_x = int((left[0] + right[0]) / 2)
-        top_y = min(left[1], right[1])
+        src_pts = np.float32([
+            [0, 0],
+            [w_c, 0],
+            [0, h_c],
+            [w_c, h_c]
+        ])
 
-        x1 = int(center_x - cloth_width / 2)
-        y1 = int(top_y)
+        # Adjust Y (important fix)
+        top_y = int(min(left[1], right[1]) - (cloth_height * 0.25))
 
-        x2 = x1 + cloth_width
-        y2 = y1 + cloth_height
+        dst_pts = np.float32([
+            [left[0], top_y],
+            [right[0], top_y],
+            [left[0] - 30, top_y + cloth_height],
+            [right[0] + 30, top_y + cloth_height]
+        ])
 
-        # 6. Boundary check
-        h, w = person_np.shape[:2]
+        matrix = cv2.getPerspectiveTransform(src_pts, dst_pts)
 
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(w, x2)
-        y2 = min(h, y2)
+        warped_cloth = cv2.warpPerspective(
+            cloth_np,
+            matrix,
+            (person_np.shape[1], person_np.shape[0])
+        )
 
-        cloth_crop = cloth_np[0:(y2 - y1), 0:(x2 - x1)]
+        print("🔥 WARPING DONE")
 
-        # 7. Overlay with alpha blending
-        result_np = person_np.copy()
+        # -------------------------------
+        # 🔥 ALPHA BLENDING
+        # -------------------------------
+        alpha_mask = warped_cloth[:, :, 3] / 255.0
 
-        alpha = 0.7
+        for c in range(3):
+            person_np[:, :, c] = (
+                alpha_mask * warped_cloth[:, :, c] +
+                (1 - alpha_mask) * person_np[:, :, c]
+            )
 
-        region = result_np[y1:y2, x1:x2]
+        result = Image.fromarray(person_np)
 
-        blended = (
-            alpha * cloth_crop + (1 - alpha) * region
-        ).astype(np.uint8)
-
-        result_np[y1:y2, x1:x2] = blended
-
-        result = Image.fromarray(result_np)
-
-        print("🔥 FINAL TRY-ON DONE")
+        print("🔥 FINAL OUTPUT READY")
 
         result.save(result_path)
 
