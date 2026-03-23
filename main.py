@@ -1,12 +1,15 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse, FileResponse
-import shutil, os, time, uuid
+import shutil, os, uuid
 from PIL import Image
 import numpy as np
 from rembg import remove
 import cv2
 import mediapipe as mp
 import requests
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = FastAPI()
 
@@ -49,12 +52,29 @@ def segment_person(image_path):
 # 🔥 CALL COLAB AI
 # -------------------------------
 def call_ai(image_path):
-    url = "https://dissimilar-madyson-uncritically.ngrok-free.dev/ai"  # 🔥 update if changed
+    url = os.getenv("COLAB_AI_URL")
+
+    if not url:
+        raise Exception("COLAB_AI_URL not set")
 
     with open(image_path, "rb") as f:
-        res = requests.post(url, files={"file": f})
+        res = requests.post(
+            url,
+            files={"file": f},
+            verify=False,
+            headers={
+                "ngrok-skip-browser-warning": "true"
+            }
+        )
 
-    return res.json()
+    # ngrok offline detect
+    if res.headers.get("ngrok-error-code") == "ERR_NGROK_3200" or "ERR_NGROK_3200" in res.text:
+        raise Exception("❌ Colab/ngrok offline. Restart Colab & update URL")
+
+    if res.status_code != 200:
+        raise Exception(f"AI server error: {res.text}")
+
+    return res.content
 
 
 # -------------------------------
@@ -69,6 +89,7 @@ async def tryon(user_image: UploadFile = File(...), product_image: UploadFile = 
     product_path = os.path.join(UPLOAD_DIR, f"{job_id}_product.png")
     result_path = os.path.join(UPLOAD_DIR, f"{job_id}_result.png")
 
+    # save images
     with open(user_path, "wb") as f:
         shutil.copyfileobj(user_image.file, f)
 
@@ -76,19 +97,19 @@ async def tryon(user_image: UploadFile = File(...), product_image: UploadFile = 
         shutil.copyfileobj(product_image.file, f)
 
     try:
-        # 1. SEGMENT
+        print("🔥 Step 1: Segmentation")
         person_img = segment_person(user_path)
         person_np = np.array(person_img)
         person_rgb = person_np[:, :, :3]
 
-        # 2. POSE
+        print("🔥 Step 2: Pose Detection")
         shoulders = get_shoulders(user_path)
         if shoulders is None:
             raise Exception("Pose not detected")
 
         left, right = shoulders
 
-        # 3. CLOTH
+        print("🔥 Step 3: Cloth Resize")
         shoulder_width = abs(right[0] - left[0])
         cloth_width = int(shoulder_width * 1.5)
         cloth_height = int(cloth_width * 1.3)
@@ -96,7 +117,7 @@ async def tryon(user_image: UploadFile = File(...), product_image: UploadFile = 
         cloth = Image.open(product_path).convert("RGBA")
         cloth_np = np.array(cloth.resize((cloth_width, cloth_height)))
 
-        # 4. WARP
+        print("🔥 Step 4: Warping")
         src = np.float32([[0,0],[cloth_width,0],[0,cloth_height],[cloth_width,cloth_height]])
 
         top_y = int(min(left[1], right[1]) - cloth_height * 0.3)
@@ -116,7 +137,7 @@ async def tryon(user_image: UploadFile = File(...), product_image: UploadFile = 
             (person_rgb.shape[1], person_rgb.shape[0])
         )
 
-        # 5. BLEND
+        print("🔥 Step 5: Blending")
         alpha = warped[:, :, 3] / 255.0
 
         for c in range(3):
@@ -125,15 +146,18 @@ async def tryon(user_image: UploadFile = File(...), product_image: UploadFile = 
                 (1 - alpha) * person_rgb[:, :, c]
             )
 
-        # save intermediate
         Image.fromarray(person_rgb.astype(np.uint8)).save(result_path)
 
-        # 6. CALL AI (COLAB)
-        print("🔥 Sending to AI server...")
-        call_ai(result_path)
+        print("🔥 Step 6: Sending to AI (Colab)")
+        ai_output = call_ai(result_path)
+
+        with open(result_path, "wb") as f:
+            f.write(ai_output)
+
         print("🔥 AI Done")
 
     except Exception as e:
+        print("❌ ERROR:", str(e))
         return JSONResponse({"error": str(e)}, status_code=500)
 
     return {
