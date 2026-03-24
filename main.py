@@ -27,7 +27,7 @@ async def tryon(user_image: UploadFile = File(...), product_image: UploadFile = 
         shutil.copyfileobj(product_image.file, f)
 
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=600) as client:
             with open(user_path, "rb") as u, open(product_path, "rb") as p:
                 response = await client.post(
                     FASHN_API_URL,
