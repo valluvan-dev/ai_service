@@ -47,8 +47,10 @@ async def tryon(user_image: UploadFile = File(...), product_image: UploadFile = 
             return JSONResponse({"error": "No image in FASHN API response"}, status_code=502)
 
     except Exception as e:
-        print("ERROR:", str(e))
-        return JSONResponse({"error": str(e)}, status_code=500)
+        import traceback
+        err = traceback.format_exc()
+        print("FULL TRACEBACK:", err)
+        return JSONResponse({"error": str(e), "detail": err}, status_code=500)
 
     return {
         "status": "success",
