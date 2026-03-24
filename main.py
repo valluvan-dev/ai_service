@@ -6,10 +6,6 @@ import numpy as np
 from rembg import remove
 import cv2
 import mediapipe as mp
-import requests
-import urllib3
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = FastAPI()
 
@@ -46,35 +42,6 @@ def get_shoulders(image_path):
 # -------------------------------
 def segment_person(image_path):
     return remove(Image.open(image_path).convert("RGBA"))
-
-
-# -------------------------------
-# 🔥 CALL COLAB AI
-# -------------------------------
-def call_ai(image_path):
-    url = os.getenv("COLAB_AI_URL")
-
-    if not url:
-        raise Exception("COLAB_AI_URL not set")
-
-    with open(image_path, "rb") as f:
-        res = requests.post(
-            url,
-            files={"file": f},
-            verify=False,
-            headers={
-                "ngrok-skip-browser-warning": "true"
-            }
-        )
-
-    # ngrok offline detect
-    if res.headers.get("ngrok-error-code") == "ERR_NGROK_3200" or "ERR_NGROK_3200" in res.text:
-        raise Exception("❌ Colab/ngrok offline. Restart Colab & update URL")
-
-    if res.status_code != 200:
-        raise Exception(f"AI server error: {res.text}")
-
-    return res.content
 
 
 # -------------------------------
@@ -147,14 +114,6 @@ async def tryon(user_image: UploadFile = File(...), product_image: UploadFile = 
             )
 
         Image.fromarray(person_rgb.astype(np.uint8)).save(result_path)
-
-        print("🔥 Step 6: Sending to AI (Colab)")
-        ai_output = call_ai(result_path)
-
-        with open(result_path, "wb") as f:
-            f.write(ai_output)
-
-        print("🔥 AI Done")
 
     except Exception as e:
         print("❌ ERROR:", str(e))
