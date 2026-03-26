@@ -1,67 +1,77 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse, FileResponse
-import shutil, os, uuid, httpx
+import os, uuid, base64, httpx
+from PIL import Image
+import io
 
 app = FastAPI()
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-FASHN_API_URL = "https://inspectional-pseudolinguistically-halley.ngrok-free.dev/tryon"
+FAL_KEY = "516e54ee-aef6-400c-b0cd-7245254c81c9:90081abadaaf59fb3ccac6b35cf8af75"  # ← Inga mattum change pannu
+FAL_URL = "https://fal.run/fal-ai/fashn/tryon/v1.6"
 
 
-# -------------------------------
-# TRYON API
-# -------------------------------
 @app.post("/tryon")
 async def tryon(user_image: UploadFile = File(...), product_image: UploadFile = File(...)):
     job_id = str(uuid.uuid4())
 
-    user_path = os.path.join(UPLOAD_DIR, f"{job_id}_user.png")
-    product_path = os.path.join(UPLOAD_DIR, f"{job_id}_product.png")
+    # Read images
+    user_bytes = await user_image.read()
+    product_bytes = await product_image.read()
 
-    with open(user_path, "wb") as f:
-        shutil.copyfileobj(user_image.file, f)
+    # Resize images
+    user_img = Image.open(io.BytesIO(user_bytes)).convert("RGB").resize((512, 768))
+    product_img = Image.open(io.BytesIO(product_bytes)).convert("RGB").resize((512, 768))
 
-    with open(product_path, "wb") as f:
-        shutil.copyfileobj(product_image.file, f)
+    # Convert to base64
+    def to_base64(img):
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
     try:
-        async with httpx.AsyncClient(timeout=600) as client:
-            with open(user_path, "rb") as u, open(product_path, "rb") as p:
-                response = await client.post(
-                    FASHN_API_URL,
-                    files={
-                        "user_image": ("user.png", u, "image/png"),
-                        "product_image": ("product.png", p, "image/png"),
-                    }
-                )
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(
+                FAL_URL,
+                headers={
+                    "Authorization": f"Key {FAL_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model_image": to_base64(user_img),
+                    "garment_image": to_base64(product_img),
+                    "category": "tops"
+                }
+            )
 
         if response.status_code != 200:
-            return JSONResponse({"error": f"FASHN API error: {response.text}"}, status_code=502)
+            return JSONResponse({"error": response.text}, status_code=502)
 
         data = response.json()
-        base64_image = data.get("result_image") or data.get("image") or data.get("base64")
+        result_url = data["images"][0]["url"]
 
-        if not base64_image:
-            return JSONResponse({"error": "No image in FASHN API response"}, status_code=502)
+        # Download result image
+        async with httpx.AsyncClient() as client:
+            img_response = await client.get(result_url)
+
+        result_path = os.path.join(UPLOAD_DIR, f"{job_id}_result.png")
+        with open(result_path, "wb") as f:
+            f.write(img_response.content)
+
+        return {
+            "status": "success",
+            "job_id": job_id,
+            "result_image": f"/result/{job_id}"
+        }
 
     except Exception as e:
         import traceback
-        err = traceback.format_exc()
-        print("FULL TRACEBACK:", err)
-        return JSONResponse({"error": str(e), "detail": err}, status_code=500)
-
-    return {
-        "status": "success",
-        "job_id": job_id,
-        "result_image": base64_image,
-    }
+        print("ERROR:", traceback.format_exc())
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
-# -------------------------------
-# RESULT
-# -------------------------------
 @app.get("/result/{job_id}")
 async def get_result(job_id: str):
     path = os.path.join(UPLOAD_DIR, f"{job_id}_result.png")
